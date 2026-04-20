@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zenith Scientific Kernel v5.2 | True Resolution Hybrid</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
+    <style>
+        :root { --accent: #00ff41; --bg: #0a0a0c; --panel: #141418; --border: #333; --text: #e0e0e0; }
+        * { box-sizing: border-box; }
+        body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; display: flex; height: 100vh; overflow: hidden; }
+        
+        aside { width: 340px; background: var(--panel); border-right: 1px solid var(--border); padding: 20px; display: flex; flex-direction: column; gap: 20px; overflow-y: auto; }
+        .nav-label { font-size: 0.7em; color: #666; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+
+        main { flex: 1; display: flex; flex-direction: column; padding: 30px; background: #0c0c10; }
+        #chat-window { flex: 1; overflow-y: auto; border: 1px solid var(--border); padding: 25px; border-radius: 12px; background: rgba(0,0,0,0.2); margin-bottom: 20px; }
+        
+        .input-group { background: #1a1a22; padding: 15px; border-radius: 12px; border: 1px solid var(--border); display: flex; gap: 12px; align-items: flex-end; }
+        textarea { flex: 1; background: transparent; border: none; color: white; outline: none; resize: none; font-size: 1em; line-height: 1.5; }
+        button { background: var(--accent); color: black; font-weight: bold; padding: 12px 24px; border: none; border-radius: 8px; cursor: pointer; transition: 0.2s; }
+        button:hover { filter: brightness(1.1); transform: translateY(-1px); }
+        .ghost-btn { background: #222; color: #ccc; width: 100%; border: 1px solid #444; margin-top: 5px; }
+        .ghost-btn:hover { background: #333; color: white; }
+
+        input[type="text"] { width: 100%; background: #1a1a22; border: 1px solid var(--border); color: white; padding: 10px; border-radius: 6px; }
+
+        #evidence { width: 320px; background: var(--panel); border-left: 1px solid var(--border); padding: 20px; overflow-y: auto; }
+        .evidence-card { padding: 15px 0; border-bottom: 1px solid #222; font-size: 0.85em; }
+        .score-bar { height: 4px; background: #222; border-radius: 2px; margin-top: 8px; overflow: hidden; display: flex; }
+        .score-fill-bm25 { height: 100%; background: #0078d4; }
+        .score-fill-sem { height: 100%; background: var(--accent); }
+        .cite-tag { color: var(--accent); font-weight: bold; background: rgba(0, 255, 65, 0.1); padding: 2px 6px; border-radius: 4px; font-size: 0.85em; }
+        
+        .msg { margin-bottom: 20px; line-height: 1.6; }
+        .msg-ai { color: #fff; }
+    </style>
+</head>
+<body>
+
+<aside>
+    <h3>Zenith v5.2 (Hybrid)</h3>
+    
+    <div>
+        <div class="nav-label">Local Pipeline</div>
+        <input type="file" id="fileIn" accept=".pdf" style="display:none">
+        <button class="ghost-btn" style="border-style:dashed;" onclick="document.getElementById('fileIn').click()">+ Ingest Local PDF</button>
+    </div>
+
+    <div>
+        <div class="nav-label">Semantic Scholar Bridge</div>
+        <input type="text" id="doiInput" placeholder="e.g., 10.1609/aaai.v35i13.17415">
+        <button class="ghost-btn" onclick="fetchDOI()">Fetch Metadata API</button>
+    </div>
+
+    <div>
+        <div class="nav-label">Active Index</div>
+        <div id="activeFiles"></div>
+    </div>
+
+    <div style="margin-top:auto">
+        <div id="status" style="font-size:0.75em; color:var(--accent); font-weight:bold;">Kernel: Standby</div>
+        <div style="font-size:0.65em; color:#555; margin-top:10px; line-height: 1.5;">
+            • Engine: Hybrid Lexical-Semantic<br>
+            • Blending: 40% BM25 / 60% Dense<br>
+            • Sorting: True Mathematical Resolution
+        </div>
+    </div>
+</aside>
+
+<main>
+    <div id="chat-window">
+        <div class="msg msg-ai" style="color:#aaa">System: True Resolution Hybrid Search initialized. Ready for ingestion.</div>
+    </div>
+    <div class="input-group">
+        <textarea id="queryIn" placeholder="Query technical data across local PDFs and global metadata..." rows="2"></textarea>
+        <button onclick="runQuery()">RUN RAG</button>
+    </div>
+</main>
+
+<section id="evidence">
+    <div class="nav-label">Provenance Stream</div>
+    <div id="provList" style="margin-top:15px; color:#888; font-size:0.9em">Awaiting query...</div>
+</section>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+
+const ZenithPipeline = {
+    store: [],
+    df: {}, 
+    idf: {}, 
+    totalChunks: 0, 
+    avgLength: 0,
+    totalTerms: 0,
+    stopwords: new Set(['the','is','at','which','on','and','a','an','of','for','in','to','with','it','that','by','this','from','be','was','as','are','what','define','explain']),
+
+    clean(text) {
+        return text.replace(/[^\x20-\x7E]/g, " ").replace(/\s+/g, " ").trim();
+    },
+
+    tokenize(text) {
+        return text.toLowerCase()
+            .replace(/[^a-z0-9]/g, " ")
+            .split(/\s+/)
+            .filter(t => t.length > 2 && !this.stopwords.has(t))
+            .map(t => t.endsWith('s') && t.length > 4 ? t.slice(0, -1) : t);
+    },
+
+    vectorize(tokens) {
+        const vec = new Float32Array(256).fill(0);
+        tokens.forEach(t => {
+            for (let i = 0; i < 256; i++) {
+                let h = 0;
+                for (let j = 0; j < t.length; j++) h = (h << 5) - h + t.charCodeAt(j);
+                vec[i] += (h % (i + 1));
+            }
+        });
+        return vec;
+    },
+
+    recalculateIDF() {
+        this.avgLength = this.totalChunks > 0 ? this.totalTerms / this.totalChunks : 0;
+        for (const t in this.df) {
+            this.idf[t] = Math.log(1 + (this.totalChunks - this.df[t] + 0.5) / (this.df[t] + 0.5));
+        }
+    },
+
+    addNodeToStore(text, tokens, meta) {
+        const tf = {};
+        tokens.forEach(t => tf[t] = (tf[t] || 0) + 1);
+        
+        const unique = new Set(tokens);
+        unique.forEach(t => this.df[t] = (this.df[t] || 0) + 1);
+        
+        this.store.push({
+            text: text,
+            tokens: tokens,
+            tf: tf,
+            length: tokens.length,
+            vector: this.vectorize(tokens),
+            meta: meta
+        });
+
+        this.totalChunks += 1;
+        this.totalTerms += tokens.length;
+    },
+
+    async ingestPDF(file) {
+        const status = document.getElementById('status');
+        status.innerText = "Kernel: Extracting Local PDF...";
+        try {
+            const buffer = await file.arrayBuffer();
+            const pdf = await pdfjsLib.getDocument(buffer).promise;
+            
+            for (let i = 1; i <= pdf.numPages; i++) {
+                const page = await pdf.getPage(i);
+                const content = await page.getTextContent();
+                const text = this.clean(content.items.map(s => s.str).join(' '));
+                
+                const chunks = text.match(/[^.!?]+[.!?]+/g) || [text];
+                let currentChunk = "";
+                for (let j = 0; j < chunks.length; j++) {
+                    currentChunk += chunks[j] + " ";
+                    if ((j + 1) % 3 === 0 || j === chunks.length - 1) {
+                        const cleanStr = currentChunk.trim();
+                        const tokens = this.tokenize(cleanStr);
+                        if (tokens.length > 5 && cleanStr.replace(/[^a-zA-Z]/g, "").length / cleanStr.length > 0.4) {
+                            this.addNodeToStore(cleanStr, tokens, { source: file.name, page: i, type: 'PDF' });
+                        }
+                        currentChunk = "";
+                    }
+                }
+            }
+
+            this.recalculateIDF();
+            status.innerText = `Kernel: Hybrid Active (${this.totalChunks} Nodes)`;
+            document.getElementById('activeFiles').innerHTML += `<div style="font-size:0.8em; color:#aaa; margin-top:10px">📄 ${file.name}</div>`;
+        } catch (e) {
+            status.innerText = "Kernel: PDF Extraction Failed";
+            console.error(e);
+        }
+    },
+
+    async ingestDOI(doi) {
+        const status = document.getElementById('status');
+        status.innerText = "Kernel: Fetching API...";
+        try {
+            const response = await fetch(`https://api.semanticscholar.org/graph/v1/paper/DOI:${doi}?fields=title,abstract,authors,year`);
+            if (!response.ok) throw new Error("API request failed or DOI not found.");
+            const data = await response.json();
+
+            const abstractText = data.abstract || "No abstract available.";
+            const fullText = `[TITLE: ${data.title}] [YEAR: ${data.year}] ${abstractText}`;
+            const cleanText = this.clean(fullText);
+            const tokens = this.tokenize(cleanText);
+
+            if (tokens.length > 0) {
+                this.addNodeToStore(cleanText, tokens, { source: `DOI: ${doi}`, page: 'API', type: 'SCHOLAR' });
+                this.recalculateIDF();
+                
+                status.innerText = `Kernel: Hybrid Active (${this.totalChunks} Nodes)`;
+                document.getElementById('activeFiles').innerHTML += `<div style="font-size:0.8em; color:var(--accent); margin-top:10px">🌐 ${data.title.substring(0, 30)}...</div>`;
+            }
+        } catch (e) {
+            status.innerText = "Kernel: DOI Fetch Failed";
+            console.error(e);
+            alert("Failed to fetch DOI metadata. Please ensure the DOI is valid and network allows API calls.");
+        }
+    },
+
+    search(query) {
+        const qTokens = this.tokenize(query);
+        const qVec = this.vectorize(qTokens);
+        if (qTokens.length === 0) return [];
+
+        let maxBM25 = 0;
+
+        const results = this.store.map(chunk => {
+            // Lexical (BM25)
+            let bm25 = 0;
+            qTokens.forEach(t => {
+                if (chunk.tf[t]) {
+                    const num = chunk.tf[t] * 2.5; 
+                    const den = chunk.tf[t] + 1.5 * (0.25 + 0.75 * (chunk.length / this.avgLength));
+                    bm25 += (this.idf[t] || 0) * (num / den);
+                }
+            });
+            if (bm25 > maxBM25) maxBM25 = bm25;
+
+            // Semantic (Cosine Similarity)
+            let dot = 0, qM = 0, nM = 0;
+            for(let i=0; i<256; i++) {
+                dot += qVec[i] * chunk.vector[i];
+                qM += qVec[i] * qVec[i];
+                nM += chunk.vector[i] * chunk.vector[i];
+            }
+            const semantic = dot / (Math.sqrt(qM) * Math.sqrt(nM) + 1e-9);
+
+            // Def Boost - Reduced to 1.15 to maintain tight normalization curve
+            const boost = /(iff|defined as|definition|conflict happens|called|title:)/i.test(chunk.text) ? 1.15 : 1.0;
+
+            return { ...chunk, bm25, semantic, boost };
+        });
+
+        // Pass 2: Alpha-Beta Blending & Raw Scoring
+        const blended = results.map(r => {
+            const normBM25 = maxBM25 > 0 ? r.bm25 / maxBM25 : 0;
+            const rawHybrid = normBM25 > 0 ? ((normBM25 * 0.4) + (r.semantic * 0.6)) * r.boost : 0;
+            return { ...r, rawScore: rawHybrid, bm25Score: normBM25, semScore: r.semantic };
+        });
+
+        // Pass 3: True Mathematical Sorting (Decoupled from UI clamping)
+        const sorted = blended.filter(r => r.rawScore > 0.05).sort((a, b) => b.rawScore - a.rawScore).slice(0, 3);
+
+        // Pass 4: Safe UI Representation
+        return sorted.map(r => ({
+            ...r,
+            score: Math.min(0.999, r.rawScore)
+        }));
+    }
+};
+
+async function runQuery() {
+    const input = document.getElementById('queryIn');
+    const chat = document.getElementById('chat-window');
+    const prov = document.getElementById('provList');
+    
+    if(!input.value || ZenithPipeline.store.length === 0) return;
+
+    const results = ZenithPipeline.search(input.value);
+    
+    chat.innerHTML += `<div class="msg"><b style="color:var(--accent)">Query:</b> ${input.value}</div>`;
+    
+    if (results.length > 0) {
+        const top = results[0];
+        chat.innerHTML += `
+            <div class="msg">
+                <b>Zenith:</b> ${top.text.substring(0, 450)}${top.text.length > 450 ? '...' : ''} 
+                <span class="cite-tag">[${top.meta.type}: ${top.meta.page}]</span>
+            </div>`;
+        
+        prov.innerHTML = results.map(r => `
+            <div class="evidence-card">
+                <b>Hybrid Score: ${(r.score * 100).toFixed(1)}%</b> (${r.meta.type}: Pg ${r.meta.page})
+                <div style="font-size:0.75em; color:#666; display:flex; gap:10px; margin-top:4px">
+                    <span>Lexical (BM25): ${(r.bm25Score * 100).toFixed(0)}%</span>
+                    <span>Semantic: ${(r.semScore * 100).toFixed(0)}%</span>
+                </div>
+                <div class="score-bar">
+                    <div class="score-fill-bm25" style="width:${r.bm25Score * 40}%"></div>
+                    <div class="score-fill-sem" style="width:${r.semScore * 60}%"></div>
+                </div>
+                <div style="margin-top:8px; color:#aaa; word-wrap:break-word;">"${r.text.substring(0, 100)}..."</div>
+            </div>
+        `).join('');
+    } else {
+        chat.innerHTML += `<div class="msg" style="color:orange">System: No hybrid semantic/lexical match found across active index.</div>`;
+    }
+    
+    input.value = '';
+    chat.scrollTop = chat.scrollHeight;
+}
+
+function fetchDOI() {
+    const input = document.getElementById('doiInput');
+    const doi = input.value.trim();
+    if (doi) {
+        ZenithPipeline.ingestDOI(doi);
+        input.value = '';
+    }
+}
+
+document.getElementById('fileIn').addEventListener('change', (e) => { 
+    if (e.target.files[0]) ZenithPipeline.ingestPDF(e.target.files[0]); 
+});
+</script>
+</body>
+</html>
+            
+        self.store.append({
+            "text": text,
+            "tokens": tokens,
+            "tf": tf,
+            "length": len(tokens),
+            "vector": self.vectorize(tokens),
+            "meta": meta
+        })
+        
+        self.total_chunks += 1
+        self.total_terms += len(tokens)
+
+    def ingest_pdf_content(self, file_bytes: bytes, filename: str) -> int:
+        reader = PdfReader(io.BytesIO(file_bytes))
+        pages_processed = 0
+        
+        for i, page in enumerate(reader.pages):
+            raw_text = page.extract_text()
+            if not raw_text:
+                continue
+                
+            text = self.clean(raw_text)
+            chunks = re.split(r'[^.!?]+[.!?]+', text)
+            chunks = [c for c in chunks if c.strip()]
+            
+            current_chunk = ""
+            for j, chunk in enumerate(chunks):
+                current_chunk += chunk + " "
+                if (j + 1) % 3 == 0 or j == len(chunks) - 1:
+                    clean_str = current_chunk.strip()
+                    tokens = self.tokenize(clean_str)
+                    
+                    alpha_chars = len(re.sub(r'[^a-zA-Z]', '', clean_str))
+                    total_chars = len(clean_str)
+                    
+                    if len(tokens) > 5 and total_chars > 0 and (alpha_chars / total_chars) > 0.4:
+                        self.add_node_to_store(clean_str, tokens, {"source": filename, "page": i + 1, "type": "PDF"})
+                    
+                    current_chunk = ""
+            pages_processed += 1
+            
+        self.recalculate_idf()
+        return pages_processed
+
+    def ingest_doi(self, doi: str) -> Dict[str, Any]:
+        url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=title,abstract,authors,year"
+        response = requests.get(url)
+        if response.status_code != 200:
+            raise Exception("API request failed or DOI not found.")
+            
+        data = response.json()
+        abstract_text = data.get("abstract") or "No abstract available."
+        full_text = f"[TITLE: {data.get('title')}] [YEAR: {data.get('year')}] {abstract_text}"
+        
+        clean_text = self.clean(full_text)
+        tokens = self.tokenize(clean_text)
+        
+        if tokens:
+            self.add_node_to_store(clean_text, tokens, {"source": f"DOI: {doi}", "page": "API", "type": "SCHOLAR"})
+            self.recalculate_idf()
+            return data
+        return {}
+
+    def search(self, query: str) -> List[Dict[str, Any]]:
+        q_tokens = self.tokenize(query)
+        q_vec = self.vectorize(q_tokens)
+        
+        if not q_tokens:
+            return []
+
+        max_bm25 = 0.0
+        results = []
+
+        # Pass 1: Lexical & Semantic Scoring
+        for chunk in self.store:
+            # BM25 Lexical
+            bm25 = 0.0
+            for t in q_tokens:
+                if t in chunk["tf"]:
+                    num = chunk["tf"][t] * 2.5
+                    den = chunk["tf"][t] + 1.5 * (0.25 + 0.75 * (chunk["length"] / self.avg_length))
+                    bm25 += self.idf.get(t, 0.0) * (num / den)
+            
+            if bm25 > max_bm25:
+                max_bm25 = bm25
+
+            # Cosine Semantic
+            dot = 0.0
+            q_mag = 0.0
+            n_mag = 0.0
+            for i in range(256):
+                dot += q_vec[i] * chunk["vector"][i]
+                q_mag += q_vec[i] * q_vec[i]
+                n_mag += chunk["vector"][i] * chunk["vector"][i]
+                
+            semantic = dot / (math.sqrt(q_mag) * math.sqrt(n_mag) + 1e-9)
+
+            # Structural Definition Boost
+            boost = 1.15 if re.search(r'(iff|defined as|definition|conflict happens|called|title:)', chunk["text"], re.IGNORECASE) else 1.0
+
+            results.append({
+                "text": chunk["text"],
+                "meta": chunk["meta"],
+                "bm25_raw": bm25,
+                "semantic": semantic,
+                "boost": boost
+            })
+
+        # Pass 2: Alpha-Beta Blending & True Sorting
+        blended = []
+        for r in results:
+            norm_bm25 = (r["bm25_raw"] / max_bm25) if max_bm25 > 0 else 0.0
+            # Strict Hallucination Lock: If Lexical is 0, score is 0
+            raw_hybrid = ((norm_bm25 * 0.4) + (r["semantic"] * 0.6)) * r["boost"] if norm_bm25 > 0 else 0.0
+            
+            blended.append({
+                "text": r["text"],
+                "meta": r["meta"],
+                "raw_score": raw_hybrid,
+                "lexical_score": norm_bm25,
+                "semantic_score": r["semantic"]
+            })
+
+        # Filter low signals and sort by raw mathematical resolution
+        sorted_results = sorted([r for r in blended if r["raw_score"] > 0.05], key=lambda x: x["raw_score"], reverse=True)[:3]
+
+        # Pass 3: Safe UI Representation Clamping
+        final_output = []
+        for r in sorted_results:
+            r["score"] = min(0.999, r["raw_score"])
+            final_output.append(r)
+            
+        return final_output
+
+# Initialize Kernel
+zenith = ZenithEngine()
+
+# API Models
+class DOIRequest(BaseModel):
+    doi: str
+
+class QueryRequest(BaseModel):
+    query: str
+
+# API Endpoints
+@app.post("/ingest/pdf")
+async def ingest_pdf(file: UploadFile = File(...)):
+    if not file.filename.endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Must be a PDF file.")
+    
+    contents = await file.read()
+    pages = zenith.ingest_pdf_content(contents, file.filename)
+    
+    return {
+        "status": "success", 
+        "pages_processed": pages, 
+        "total_nodes_in_memory": zenith.total_chunks
+    }
+
+@app.post("/ingest/doi")
+async def ingest_doi(req: DOIRequest):
+    try:
+        metadata = zenith.ingest_doi(req.doi)
+        return {
+            "status": "success", 
+            "title": metadata.get("title"), 
+            "total_nodes_in_memory": zenith.total_chunks
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/search")
+async def search(req: QueryRequest):
+    if zenith.total_chunks == 0:
+        raise HTTPException(status_code=400, detail="Index is empty. Ingest documents first.")
+        
+    results = zenith.search(req.query)
+    if not results:
+        return {"status": "No match found", "results": []}
+        
+    return {"status": "success", "results": results}
+
+@app.get("/status")
+async def status():
+    return {
+        "engine": "Hybrid Lexical-Semantic",
+        "nodes": zenith.total_chunks,
+        "terms": zenith.total_terms
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
